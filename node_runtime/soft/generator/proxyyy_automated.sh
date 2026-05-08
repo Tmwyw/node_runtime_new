@@ -34,6 +34,8 @@ function usage() { echo "Usage: $0 [-s | --subnet <16|32|48|64|80|96|112> proxy 
                           [--denied-hosts <string> banned hosts or IP addresses in quotes (3proxy format)]
                            [--dns-country <auto|ISO2> DNS region for upstream resolvers (default auto by backconnect IP)]
                           [--dns-servers <ip1,ip2> explicit upstream DNS resolvers override]
+                          [--dns-pool <ip1,ip2,...,ipN> ISP DNS pool from orchestrator (Wave C-DNS);
+                                two random entries are picked per instance, takes precedence over --dns-servers and --dns-country]
                            [--network-profile <standard_nat|residential_like|high_compatibility> edge TCP/IP profile (default standard_nat)]
                            [--tcp-timestamps-mode <auto|on|off> explicit TCP timestamps mode override (default auto)]
                            [--maxconn <number> 3proxy maxconn for this instance (default 200)]
@@ -49,7 +51,7 @@ function usage() { echo "Usage: $0 [-s | --subnet <16|32|48|64|80|96|112> proxy 
                           [--info <bool> print info about running proxy server]
                           " 1>&2; exit 1; }
 
-options=$(getopt -o ldhs:c:u:p:t:r:m:f:i:b: --long help,localhost,disable-inet6-ifaces-check,random,uninstall,info,bootstrap-only,runtime-only,verify-bootstrap,skip-self-check,self-check-samples:,port-ipv6-map-file:,dns-country:,dns-servers:,network-profile:,tcp-timestamps-mode:,maxconn:,ipv6-policy:,subnet:,proxy-count:,username:,password:,proxies-type:,rotating-interval:,ipv6-mask:,interface:,start-port:,backconnect-proxies-file:,backconnect-ip:,allowed-hosts:,denied-hosts: -- "$@")
+options=$(getopt -o ldhs:c:u:p:t:r:m:f:i:b: --long help,localhost,disable-inet6-ifaces-check,random,uninstall,info,bootstrap-only,runtime-only,verify-bootstrap,skip-self-check,self-check-samples:,port-ipv6-map-file:,dns-country:,dns-servers:,dns-pool:,network-profile:,tcp-timestamps-mode:,maxconn:,ipv6-policy:,subnet:,proxy-count:,username:,password:,proxies-type:,rotating-interval:,ipv6-mask:,interface:,start-port:,backconnect-proxies-file:,backconnect-ip:,allowed-hosts:,denied-hosts: -- "$@")
 
 if [ $? != 0 ]; then echo "Error: no arguments provided. Terminating..." >&2; usage; fi;
 
@@ -76,6 +78,7 @@ self_check_samples=1
 ip_preference_mode="strict_ipv6_only"
 dns_country="auto"
 dns_servers_override=""
+dns_pool_csv=""
 network_profile="standard_nat"
 tcp_timestamps_mode="auto"
 ipv6_policy="ipv6_only"
@@ -120,6 +123,7 @@ while true; do
     --denied-hosts ) denied_hosts="$2"; shift 2 ;;
     --dns-country ) dns_country="$2"; shift 2 ;;
     --dns-servers ) dns_servers_override="$2"; shift 2 ;;
+    --dns-pool ) dns_pool_csv="$2"; shift 2 ;;
     --network-profile ) network_profile="$2"; shift 2 ;;
     --tcp-timestamps-mode ) tcp_timestamps_mode="$2"; shift 2 ;;
     --ipv6-policy ) ipv6_policy="$2"; shift 2 ;;
@@ -583,6 +587,26 @@ function is_dns_server_usable() {
 }
 
 function configure_dns_servers() {
+  # Wave C-DNS: orchestrator-curated ISP pool wins over both manual override
+  # and the country/system fallback chain. Two random IPs per instance →
+  # `3proxy_*.cfg | uniq -c` shows variance across orders.
+  if [ -n "$dns_pool_csv" ]; then
+    IFS=',' read -ra POOL <<< "$dns_pool_csv"
+    pool_size=${#POOL[@]}
+    if [ "$pool_size" -ge 2 ]; then
+      idx1=$((RANDOM % pool_size))
+      idx2=$((RANDOM % pool_size))
+      while [ "$idx2" -eq "$idx1" ]; do idx2=$((RANDOM % pool_size)); done
+      dns_nserver_lines="  nserver ${POOL[$idx1]}"$'\n'"  nserver ${POOL[$idx2]}"
+      dns_selected_country="pool"
+      dns_selected_servers_csv="${POOL[$idx1]},${POOL[$idx2]}"
+      dns_selection_strategy="pool_random"
+      echo "   DNS selected (pool_random, pool_size=${pool_size}): ${dns_selected_servers_csv}"
+      return
+    fi
+    echo "   WARNING: --dns-pool got fewer than 2 entries (pool_size=${pool_size}); falling through to legacy DNS picker"
+  fi
+
   if [ -n "$dns_servers_override" ]; then
     IFS=',' read -r dns_override_1 dns_override_2 _ <<< "$dns_servers_override"
     dns_override_1=$(echo "$dns_override_1" | tr -d '[:space:]')
