@@ -10,19 +10,19 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 # Program help info for users
-function usage() { echo "Usage: $0 [-s | --subnet <16|32|48|64|80|96|112> proxy subnet (default 64)]
-                          [-c | --proxy-count <number> count of proxies]
-                          [-u | --username <string> proxy auth username]
+function usage() { echo "Usage: $0 [-s | --subnet <16|32|48|64|80|96|112> proxy subnet (default 64)] 
+                          [-c | --proxy-count <number> count of proxies] 
+                          [-u | --username <string> proxy auth username] 
                           [-p | --password <string> proxy password]
-                          [--random <bool> generate random username/password for each IPv4 backconnect proxy instead of predefined (default false)]
+                          [--random <bool> generate random username/password for each IPv4 backconnect proxy instead of predefined (default false)] 
                           [-t | --proxies-type <http|socks5> result proxies type (default socks5)]
                           [-r | --rotating-interval <0-59> proxies external address rotating time in minutes (default 0, disabled)]
                           [--start-port <5000-65536> start port for backconnect ipv4 (default 30000)]
                           [-l | --localhost <bool> allow connections only for localhost (backconnect on 127.0.0.1)]
                           [-f | --backconnect-proxies-file <string> path to file, in which backconnect proxies list will be written
-                                when proxies start working (default \`/opt/netrun/proxyserver/backconnect_proxies.list\`)]
+                                when proxies start working (default \`~/proxyserver/backconnect_proxies.list\`)]    
                           [-d | --disable-inet6-ifaces-check <bool> disable /etc/network/interfaces configuration check & exit when error
-                                use only if configuration handled by cloud-init or something like this (for example, on Vultr servers)]
+                                use only if configuration handled by cloud-init or something like this (for example, on Vultr servers)]                                                      
                           [-m | --ipv6-mask <string> constant ipv6 address mask, to which the rotated part is added (or gateway)
                                 use only if the gateway is different from the subnet address]
                           [-i | --interface <string> full name of ethernet interface, on which IPv6 subnet was allocated
@@ -34,16 +34,14 @@ function usage() { echo "Usage: $0 [-s | --subnet <16|32|48|64|80|96|112> proxy 
                           [--denied-hosts <string> banned hosts or IP addresses in quotes (3proxy format)]
                            [--dns-country <auto|ISO2> DNS region for upstream resolvers (default auto by backconnect IP)]
                           [--dns-servers <ip1,ip2> explicit upstream DNS resolvers override]
-                          [--dns-pool <ip1,ip2,...,ipN> ISP DNS pool from orchestrator (Wave C-DNS);
-                                two random entries are picked per instance, takes precedence over --dns-servers and --dns-country]
                            [--network-profile <standard_nat|residential_like|high_compatibility> edge TCP/IP profile (default standard_nat)]
                            [--tcp-timestamps-mode <auto|on|off> explicit TCP timestamps mode override (default auto)]
                            [--maxconn <number> 3proxy maxconn for this instance (default 200)]
-                           [--ipv6-policy <strict_dual_stack|ipv6_required|ipv6_only> egress family policy (default ipv6_only)]
+                           [--ipv6-policy <strict_dual_stack|ipv6_required|ipv6_only> egress family policy (default strict_dual_stack)]
                             [--skip-self-check <bool> disable post-start dual-stack self-check (default false)]
                            [--self-check-samples <number> number of first proxies to test for policy self-check (default 1)]
                           [--port-ipv6-map-file <string> path to CSV file with port-to-IPv6 mapping
-                                (default \`/opt/netrun/proxyserver/port_ipv6_map_<start_port>.csv\`)]
+                                (default \`~/proxyserver/port_ipv6_map_<start_port>.csv\`)]
                           [--bootstrap-only run one-time node bootstrap and exit]
                           [--runtime-only run proxy generation only (no bootstrap side-effects)]
                           [--verify-bootstrap check bootstrap prerequisites and exit]
@@ -51,7 +49,7 @@ function usage() { echo "Usage: $0 [-s | --subnet <16|32|48|64|80|96|112> proxy 
                           [--info <bool> print info about running proxy server]
                           " 1>&2; exit 1; }
 
-options=$(getopt -o ldhs:c:u:p:t:r:m:f:i:b: --long help,localhost,disable-inet6-ifaces-check,random,uninstall,info,bootstrap-only,runtime-only,verify-bootstrap,skip-self-check,self-check-samples:,port-ipv6-map-file:,dns-country:,dns-servers:,dns-pool:,network-profile:,tcp-timestamps-mode:,maxconn:,ipv6-policy:,subnet:,proxy-count:,username:,password:,proxies-type:,rotating-interval:,ipv6-mask:,interface:,start-port:,backconnect-proxies-file:,backconnect-ip:,allowed-hosts:,denied-hosts: -- "$@")
+options=$(getopt -o ldhs:c:u:p:t:r:m:f:i:b: --long help,localhost,disable-inet6-ifaces-check,random,uninstall,info,bootstrap-only,runtime-only,verify-bootstrap,skip-self-check,self-check-samples:,port-ipv6-map-file:,dns-country:,dns-servers:,network-profile:,tcp-timestamps-mode:,maxconn:,ipv6-policy:,subnet:,proxy-count:,username:,password:,proxies-type:,rotating-interval:,ipv6-mask:,interface:,start-port:,backconnect-proxies-file:,backconnect-ip:,allowed-hosts:,denied-hosts: -- "$@")
 
 if [ $? != 0 ]; then echo "Error: no arguments provided. Terminating..." >&2; usage; fi;
 
@@ -72,16 +70,15 @@ port_ipv6_map_file="default"
 interface_name="$(ip -br l | awk '$1 !~ "lo|vir|wl|@NONE" { print $1 }' | awk 'NR==1')"
 script_log_file="/var/tmp/ipv6-proxy-server-logs.log"
 backconnect_ipv4=""
-mode_flag="-6"
+mode_flag="-64"  # Universal mode by default
 run_self_check=true
 self_check_samples=1
-ip_preference_mode="strict_ipv6_only"
+ip_preference_mode="compat_ipv6_first"
 dns_country="auto"
 dns_servers_override=""
-dns_pool_csv=""
 network_profile="standard_nat"
 tcp_timestamps_mode="auto"
-ipv6_policy="ipv6_only"
+ipv6_policy="strict_dual_stack"
 proxy_maxconn=200
 proxy_count=1
 dns_selected_country="fallback"
@@ -123,7 +120,6 @@ while true; do
     --denied-hosts ) denied_hosts="$2"; shift 2 ;;
     --dns-country ) dns_country="$2"; shift 2 ;;
     --dns-servers ) dns_servers_override="$2"; shift 2 ;;
-    --dns-pool ) dns_pool_csv="$2"; shift 2 ;;
     --network-profile ) network_profile="$2"; shift 2 ;;
     --tcp-timestamps-mode ) tcp_timestamps_mode="$2"; shift 2 ;;
     --ipv6-policy ) ipv6_policy="$2"; shift 2 ;;
@@ -142,11 +138,6 @@ while true; do
     * ) break ;;
   esac
 done
-
-if [ "$ipv6_policy" != "ipv6_only" ]; then
-  echo "ERROR: ipv6_only is required for production"
-  exit 1
-fi
 
 if [ "$bootstrap_only" = true ] && [ "$runtime_only" = true ]; then
   echo "Error: --bootstrap-only and --runtime-only cannot be used together" 1>&2
@@ -206,12 +197,17 @@ function check_startup_parameters() {
     log_err_print_usage_and_exit "Error: invalid value of '-t' (proxy type) parameter";
   fi;
 
-  if [ "$ipv6_policy" != "ipv6_only" ]; then
-    log_err_print_usage_and_exit "ERROR: ipv6_only is required for production";
+  if [ "$ipv6_policy" != "strict_dual_stack" ] && [ "$ipv6_policy" != "ipv6_required" ] && [ "$ipv6_policy" != "ipv6_only" ]; then
+    log_err_print_usage_and_exit "Error: '--ipv6-policy' must be one of: strict_dual_stack, ipv6_required, ipv6_only";
   fi;
 
-  mode_flag="-6"
-  ip_preference_mode="strict_ipv6_only"
+  if [ "$ipv6_policy" = "ipv6_only" ]; then
+    mode_flag="-6"
+    ip_preference_mode="strict_ipv6_only"
+  else
+    mode_flag="-64"
+    ip_preference_mode="compat_ipv6_first"
+  fi;
 
   if [ $(expr $subnet % 4) != 0 ]; then
     log_err_print_usage_and_exit "Error: invalid value of '-s' (subnet) parameter, must be divisible by 4";
@@ -351,8 +347,9 @@ function apply_network_profile_sysctl() {
 }
 
 bash_location="$(which bash)"
-proxy_dir="${NODE_AGENT_PROXY_ROOT:-/opt/netrun/proxyserver}"
-proxy_dir="${proxy_dir%/}"
+cd ~
+user_home_dir="$(pwd)"
+proxy_dir="$user_home_dir/proxyserver"
 bootstrap_marker_file="$proxy_dir/.netrun_bootstrap.json"
 
 # === MULTI-INSTANCE SUPPORT ===
@@ -587,26 +584,6 @@ function is_dns_server_usable() {
 }
 
 function configure_dns_servers() {
-  # Wave C-DNS: orchestrator-curated ISP pool wins over both manual override
-  # and the country/system fallback chain. Two random IPs per instance →
-  # `3proxy_*.cfg | uniq -c` shows variance across orders.
-  if [ -n "$dns_pool_csv" ]; then
-    IFS=',' read -ra POOL <<< "$dns_pool_csv"
-    pool_size=${#POOL[@]}
-    if [ "$pool_size" -ge 2 ]; then
-      idx1=$((RANDOM % pool_size))
-      idx2=$((RANDOM % pool_size))
-      while [ "$idx2" -eq "$idx1" ]; do idx2=$((RANDOM % pool_size)); done
-      dns_nserver_lines="  nserver ${POOL[$idx1]}"$'\n'"  nserver ${POOL[$idx2]}"
-      dns_selected_country="pool"
-      dns_selected_servers_csv="${POOL[$idx1]},${POOL[$idx2]}"
-      dns_selection_strategy="pool_random"
-      echo "   DNS selected (pool_random, pool_size=${pool_size}): ${dns_selected_servers_csv}"
-      return
-    fi
-    echo "   WARNING: --dns-pool got fewer than 2 entries (pool_size=${pool_size}); falling through to legacy DNS picker"
-  fi
-
   if [ -n "$dns_servers_override" ]; then
     IFS=',' read -r dns_override_1 dns_override_2 _ <<< "$dns_servers_override"
     dns_override_1=$(echo "$dns_override_1" | tr -d '[:space:]')
@@ -818,19 +795,32 @@ function check_ipv6() {
 function install_requred_packages() {
   apt update &>> $script_log_file;
 
-  requred_packages=("wget" "curl" "cron" "nftables");
+  requred_packages=("make" "g++" "wget" "curl" "cron");
   for package in ${requred_packages[@]}; do install_package $package; done;
 
   echo -e "\nРІСљвЂ¦ All required packages installed successfully";
 }
 
 function install_3proxy() {
+  mkdir $proxy_dir && cd $proxy_dir
+
+  echo -e "\nСЂСџвЂњТђ Downloading proxy server source...";
+  (
+  wget https://github.com/3proxy/3proxy/archive/refs/tags/0.9.4.tar.gz &> /dev/null
+  tar -xf 0.9.4.tar.gz
+  rm 0.9.4.tar.gz
+  mv 3proxy-0.9.4 3proxy) &>> $script_log_file
+  echo "РІСљвЂ¦ Proxy server source code downloaded successfully";
+
+  echo -e "\nСЂСџвЂќРЃ Start building proxy server execution file from source...";
+  cd 3proxy
+  make -f Makefile.Linux &>> $script_log_file;
   if test -f "$proxy_dir/3proxy/bin/3proxy"; then
-    chmod +x "$proxy_dir/3proxy/bin/3proxy" || true
-    echo "Bundled 3proxy binary is ready"
+    echo "РІСљвЂ¦ Proxy server built successfully"
   else
-    log_err_and_exit "missing_bundled_3proxy_binary: expected $proxy_dir/3proxy/bin/3proxy"
+    log_err_and_exit "Error: proxy server build from source code failed."
   fi;
+  cd ..
 }
 
 function configure_ipv6() {
@@ -851,17 +841,17 @@ function configure_ipv6() {
 function add_to_cron() {
   # Get existing crontab, add THIS instance's startup script
   # Do NOT remove other instances' scripts!
-
+  
   local temp_cron="/tmp/cron_temp_$$"
-
+  
   # Get existing crontab (excluding THIS specific startup script if already there)
   crontab -l 2>/dev/null | grep -v "$startup_script_path" > "$temp_cron" || true
-
+  
   # Add this instance's reboot entry
   echo "@reboot $bash_location $startup_script_path" >> "$temp_cron"
-
+  
   # Add rotation if needed
-  if [ $rotating_interval -ne 0 ]; then
+  if [ $rotating_interval -ne 0 ]; then 
     echo "*/$rotating_interval * * * * $bash_location $startup_script_path" >> "$temp_cron"
   fi;
 
@@ -890,7 +880,7 @@ function remove_from_cron() {
 
 function generate_random_users_if_needed() {
   if [ $use_random_auth != true ]; then return; fi;
-
+  
   # Only generate new credentials if file doesn't exist
   # This preserves credentials across restarts
   if [ -f "$random_users_list_file" ]; then
@@ -910,13 +900,13 @@ function generate_ipv6_addresses_if_needed() {
     echo "   Using existing IPv6 addresses from $random_ipv6_list_file"
     return
   fi
-
+  
   echo "   Generating $proxy_count unique IPv6 addresses..."
-
+  
   array=( 1 2 3 4 5 6 7 8 9 0 a b c d e f )
-
+  
   function rh () { echo ${array[$RANDOM%16]}; }
-
+  
   rnd_subnet_ip () {
     echo -n $(get_subnet_mask);
     symbol=$subnet
@@ -927,7 +917,7 @@ function generate_ipv6_addresses_if_needed() {
     done;
     echo ;
   }
-
+  
   count=1
   while [ "$count" -le $proxy_count ]; do
     # Generate unique IPv6 - check it's not already in use
@@ -938,7 +928,7 @@ function generate_ipv6_addresses_if_needed() {
     echo "$new_ipv6" >> $random_ipv6_list_file;
     ((count+=1))
   done
-
+  
   echo "   РІСљвЂ¦ Generated $proxy_count IPv6 addresses"
 }
 
@@ -965,7 +955,7 @@ function create_startup_script() {
 
 	# Generate IPv6 addresses for THIS instance only
 	# NOTE: We do NOT delete old IPv6 list - keep it for persistence
-
+	
 	array=( 1 2 3 4 5 6 7 8 9 0 a b c d e f )
 
 	function rh () { echo \${array[\$RANDOM%16]}; }
@@ -1048,16 +1038,16 @@ $dns_nserver_lines
 
 	ulimit -n 600000
 	ulimit -u 600000
-
+	
 	# Add IPv6 addresses (ignore errors if already exist)
-	for ipv6_address in \$(cat ${random_ipv6_list_file}); do
+	for ipv6_address in \$(cat ${random_ipv6_list_file}); do 
 	  ip -6 addr add \$ipv6_address dev $interface_name 2>/dev/null || true
 	done;
 
 	# NOTE: We do NOT kill old proxy processes - each instance is independent!
-
+	
 	# Start THIS 3proxy instance as a detached daemon
-	nohup ${proxy_dir}/3proxy/bin/3proxy ${proxyserver_config_path} >/dev/null 2>&1 &
+	nohup ${user_home_dir}/proxyserver/3proxy/bin/3proxy ${proxyserver_config_path} >/dev/null 2>&1 &
 	sleep 2  # Wait for daemon to initialize
 
 	# NOTE: We do NOT delete old IPv6 addresses - they belong to other instances!
@@ -1186,7 +1176,7 @@ function setup_nftables_counters() {
   echo "   РІСљвЂ¦ IPv6 OUTPUT (saddr): proxy -> internet (bytesOut) - counted by IPv6 address!"
   echo "   РІСљвЂ¦ IPv6 INPUT (daddr): internet -> proxy (responses)"
   ensure_nftables_ready
-
+  
   # Check if table exists
   if ! nft list table inet proxy_accounting 2>/dev/null >/dev/null; then
     echo "   СЂСџвЂњВ¦ Creating new proxy_accounting table..."
@@ -1196,10 +1186,10 @@ function setup_nftables_counters() {
       log_err_and_exit "nft table inet proxy_accounting is missing. Run bootstrap-only mode first."
     fi
   fi
-
+  
   # Ensure chains exist with correct priority (idempotent operations)
   # We do NOT delete the table to avoid killing other instances' counters
-
+  
   # Try to create chains (will fail if exist, that's fine)
   if [ "$bootstrap_side_effects_allowed" = true ]; then
     nft add chain inet proxy_accounting input '{ type filter hook input priority 0; policy accept; }' 2>/dev/null || true
@@ -1212,7 +1202,7 @@ function setup_nftables_counters() {
       log_err_and_exit "nft chain inet proxy_accounting output is missing. Run bootstrap-only mode first."
     fi;
   fi
-
+  
   # Check priority just for info
   if nft list table inet proxy_accounting | grep -q "priority filter"; then
      echo "   РІС™В РїС‘РЏ  WARNING: Table seems to have 'priority filter' (default). 'priority 0' is recommended."
@@ -1221,45 +1211,45 @@ function setup_nftables_counters() {
   else
      echo "   РІСљвЂ¦ Table priority check passed"
   fi
-
+  
   echo "   Adding counter rules for $proxy_count proxies..."
-
+  
   # Read IPv6 addresses from the list file
   if [ ! -f "$random_ipv6_list_file" ]; then
     echo "   РІС™В РїС‘РЏ IPv6 list file not found, will be created on first run"
     return
   fi
-
+  
   readarray -t ipv6_addresses < "$random_ipv6_list_file"
   local added_count=0
   local failed_count=0
-
+  
   for ((i=0; i<proxy_count; i++)); do
     local port=$((start_port + i))
     local ipv6="${ipv6_addresses[$i]}"
-
+    
     # Skip if no IPv6 address (shouldn't happen)
     if [ -z "$ipv6" ]; then
       echo "   РІСњРЉ ERROR: No IPv6 address for port $port (index $i)"
       failed_count=$((failed_count + 1))
       continue
     fi
-
+    
     # Delete existing rules for this proxy (cleanup)
     nft delete rule inet proxy_accounting input tcp dport "$port" 2>/dev/null || true
     nft delete rule inet proxy_accounting output ip6 saddr "$ipv6" 2>/dev/null || true
     nft delete rule inet proxy_accounting input ip6 daddr "$ipv6" 2>/dev/null || true
-
+    
     # Delete existing named counters if they exist
     nft delete counter inet proxy_accounting "proxy_${port}_in" 2>/dev/null || true
     nft delete counter inet proxy_accounting "proxy_${port}_out" 2>/dev/null || true
     nft delete counter inet proxy_accounting "proxy_${port}_in6" 2>/dev/null || true
-
+    
     # Create named counters first
     nft add counter inet proxy_accounting "proxy_${port}_in" 2>/dev/null || true
     nft add counter inet proxy_accounting "proxy_${port}_out" 2>/dev/null || true
     nft add counter inet proxy_accounting "proxy_${port}_in6" 2>/dev/null || true
-
+    
     # РІСљвЂ¦ IPv4 INPUT counter: client -> proxy (bytesIn)
     # Counts incoming connections to proxy port
     local err_msg=$(nft add rule inet proxy_accounting input tcp dport "$port" counter name "proxy_${port}_in" comment "proxy_${port}_in" 2>&1)
@@ -1269,7 +1259,7 @@ function setup_nftables_counters() {
       echo "   РІСњРЉ Failed INPUT rule for port $port: $err_msg"
       failed_count=$((failed_count + 1))
     fi
-
+    
     # РІСљвЂ¦ IPv6 OUTPUT counter: proxy -> internet (bytesOut)
     # Counts by IPv6 SOURCE address (not port!) because outgoing connections use random ports
     err_msg=$(nft add rule inet proxy_accounting output ip6 saddr "$ipv6" counter name "proxy_${port}_out" comment "proxy_${port}_out" 2>&1)
@@ -1277,20 +1267,20 @@ function setup_nftables_counters() {
       echo "   РІСњРЉ Failed OUTPUT rule for IPv6 $ipv6 (port $port): $err_msg"
       failed_count=$((failed_count + 1))
     fi
-
+    
     # РІСљвЂ¦ IPv6 INPUT counter: internet -> proxy (responses, optional but useful)
     # Counts responses coming back to proxy IPv6
     err_msg=$(nft add rule inet proxy_accounting input ip6 daddr "$ipv6" counter name "proxy_${port}_in6" comment "proxy_${port}_in6" 2>&1)
     if [ $? -ne 0 ]; then
       echo "   РІСњРЉ Failed INPUT6 rule for IPv6 $ipv6 (port $port): $err_msg"
     fi
-
+    
     # Show progress every 100
     if [ $((i % 100)) -eq 0 ] && [ "$i" -gt 0 ]; then
       echo "   [PROGRESS] Setup $i/$proxy_count counters..."
     fi
   done
-
+  
   if [ $failed_count -gt 0 ]; then
     echo "РІС™В РїС‘РЏ  Setup $added_count nftables counters (IPv6-address based) with $failed_count failures"
   else
@@ -1300,12 +1290,12 @@ function setup_nftables_counters() {
   echo "      РІР‚Сћ IPv4 INPUT: tcp dport (client РІвЂ вЂ™ proxy bytesIn)"
   echo "      РІР‚Сћ IPv6 OUTPUT: ip6 saddr (proxy РІвЂ вЂ™ internet bytesOut)"
   echo "      РІР‚Сћ IPv6 INPUT: ip6 daddr (internet РІвЂ вЂ™ proxy responses)"
-
+  
   # Save nftables rules for persistence
   echo "СЂСџвЂ™С• Saving nftables rules for persistence..."
   nft list ruleset > /etc/nftables.conf 2>/dev/null || true
   echo "   РІСљвЂ¦ nftables rules saved to /etc/nftables.conf"
-
+  
   # Show sample counter for verification
   if [ $added_count -gt 0 ]; then
     echo ""
@@ -1330,13 +1320,13 @@ function setup_iptables_counters() {
   echo "   IPv4 INPUT (--dport): client -> proxy (bytesIn)"
   echo "   IPv6 INPUT (--dport): client -> proxy (if IPv6 clients)"
   echo "   IPv6 OUTPUT (--sport): proxy -> internet (bytesOut)"
-
+  
   local added_count=0
   local skipped_count=0
-
+  
   for ((i=0; i<proxy_count; i++)); do
     local port=$((start_port + i))
-
+    
     # Р СџР С•Р В»Р Р…Р С•Р Вµ РЎС“Р Т‘Р В°Р В»Р ВµР Р…Р С‘Р Вµ Р В»РЎР‹Р В±РЎвЂ№РЎвЂ¦ РЎРѓРЎвЂљР В°РЎР‚РЎвЂ№РЎвЂ¦ Р С—РЎР‚Р В°Р Р†Р С‘Р В» Р С—Р С•Р Т‘ РЎРЊРЎвЂљР С•РЎвЂљ Р С—Р С•РЎР‚РЎвЂљ (v4/v6, dport/sport, Р В»РЎР‹Р В±РЎвЂ№Р Вµ РЎвЂљР В°РЎР‚Р С–Р ВµРЎвЂљРЎвЂ№)
     while iptables  -w 2 -D PROXY_ACCOUNTING -p tcp --dport "$port"  -j RETURN 2>/dev/null; do :; done
     while iptables  -w 2 -D PROXY_ACCOUNTING -p tcp --sport "$port"  -j RETURN 2>/dev/null; do :; done
@@ -1352,10 +1342,10 @@ function setup_iptables_counters() {
     iptables  -w 2 -A PROXY_ACCOUNTING -p tcp --dport "$port" -m comment --comment "proxy_$port"       -j RETURN 2>/dev/null || true
     iptables  -w 2 -A PROXY_ACCOUNTING -p tcp --sport "$port" -m comment --comment "proxy_${port}_out" -j RETURN 2>/dev/null || true
     ip6tables -w 2 -A PROXY_ACCOUNTING -p tcp --sport "$port" -m comment --comment "proxy_${port}_out" -j RETURN 2>/dev/null || true
-
+    
     # CRITICAL: APPEND jump rules (avoid conflicts with multiple proxy instances)
     # Use APPEND instead of INSERT to avoid position conflicts
-
+    
     # IPv4 INPUT: Delete old rule (if exists), then APPEND (bytesIn)
     iptables -w 2 -D INPUT -p tcp --dport "$port" -j PROXY_ACCOUNTING 2>/dev/null || true
     iptables -w 2 -A INPUT -p tcp --dport "$port" -j PROXY_ACCOUNTING 2>/dev/null || true
@@ -1363,35 +1353,35 @@ function setup_iptables_counters() {
     # IPv4 OUTPUT (fallback): Delete old rule (if exists), then APPEND
     iptables -w 2 -D OUTPUT -p tcp --sport "$port" -j PROXY_ACCOUNTING 2>/dev/null || true
     iptables -w 2 -A OUTPUT -p tcp --sport "$port" -j PROXY_ACCOUNTING 2>/dev/null || true
-
+    
     # IPv6 INPUT: Delete old rule (if exists), then APPEND
     ip6tables -w 2 -D INPUT -p tcp --dport "$port" -j PROXY_ACCOUNTING 2>/dev/null || true
     ip6tables -w 2 -A INPUT -p tcp --dport "$port" -j PROXY_ACCOUNTING 2>/dev/null || true
-
+    
     # IPv6 OUTPUT (primary): Delete old rule (if exists), then APPEND
     ip6tables -w 2 -D OUTPUT -p tcp --sport "$port" -j PROXY_ACCOUNTING 2>/dev/null || true
     ip6tables -w 2 -A OUTPUT -p tcp --sport "$port" -j PROXY_ACCOUNTING 2>/dev/null || true
-
+    
     # Show progress every 100
     if [ $((i % 100)) -eq 0 ] && [ "$i" -gt 0 ]; then
       echo "   [PROGRESS] Setup $i/$proxy_count counters..."
     fi
   done
-
+  
   echo "РІСљвЂ¦ Setup $added_count new iptables counters (skipped $skipped_count existing)"
   echo "   Rules inserted at position 1 (before firewall rules)"
-
+  
   # === SAVE IPTABLES RULES (persistent across reboots) ===
   echo "СЂСџвЂ™С• Saving iptables rules for persistence..."
-
+  
   # Create directories if they don't exist
   mkdir -p /etc/iptables 2>/dev/null || true
-
+  
   if command -v iptables-save &> /dev/null; then
     iptables-save > /etc/iptables/rules.v4 2>/dev/null || iptables-save > /etc/iptables.rules 2>/dev/null || true
     ip6tables-save > /etc/iptables/rules.v6 2>/dev/null || ip6tables-save > /etc/ip6tables.rules 2>/dev/null || true
     echo "   РІСљвЂ¦ iptables rules saved"
-
+    
     # Install iptables-persistent if not already installed (for auto-restore on reboot)
     if ! dpkg -l 2>/dev/null | grep -q iptables-persistent; then
       echo "   СЂСџвЂњВ¦ Installing iptables-persistent for auto-restore on reboot..."
@@ -1407,19 +1397,19 @@ function run_proxy_server() {
 
   chmod +x $startup_script_path;
   $bash_location $startup_script_path
-
+  
   # Wait for THIS proxy instance to start (give it up to 5 seconds)
   for i in {1..5}; do
     sleep 1
     # Check if THIS specific config is running
     if ps aux | grep -v grep | grep -q "$proxyserver_config_path"; then
       echo -e "\nРІСљвЂ¦ IPv6 proxy server process started!"
-
+      
       # Verify ports are actually listening
       local ports_ok=0
       local ports_fail=0
       echo "   Checking ports..."
-
+      
       for ((p=$start_port; p<=$last_port; p++)); do
         if ss -ltn 2>/dev/null | grep -qE ":${p}(\s|$|:)"; then
           ((ports_ok++))
@@ -1427,13 +1417,13 @@ function run_proxy_server() {
           ((ports_fail++))
         fi
       done
-
+      
       if [ $ports_fail -eq 0 ]; then
         echo "   РІСљвЂ¦ All $ports_ok ports are listening"
       else
         echo "   РІС™В РїС‘РЏ $ports_ok ports OK, $ports_fail ports NOT listening"
       fi
-
+      
       echo "СЂСџРЉС’ Backconnect IPv4: $backconnect_ipv4:$start_port$credentials to $backconnect_ipv4:$last_port$credentials"
       echo "СЂСџвЂќвЂ™ Protocol: $proxies_type"
       echo "СЂСџвЂњРѓ Proxy list file: $backconnect_proxies_file"
@@ -1441,7 +1431,7 @@ function run_proxy_server() {
       return 0
     fi
   done
-
+  
   log_err_and_exit "Error: cannot run proxy server - timeout waiting for startup";
 }
 
@@ -1632,73 +1622,73 @@ EOF
 
 function cleanup_nftables_rules() {
   echo "СЂСџВ§в„– Cleaning up nftables rules for ports $start_port-$last_port..."
-
+  
   if ! command -v nft &> /dev/null; then
     echo "   РІС™В РїС‘РЏ nftables not installed, skipping cleanup"
     return
   fi
-
+  
   # Read IPv6 addresses if file exists
   local ipv6_addresses=()
   if [ -f "$random_ipv6_list_file" ]; then
     readarray -t ipv6_addresses < "$random_ipv6_list_file"
   fi
-
+  
   local cleaned_count=0
-
+  
   for ((i=0; i<proxy_count; i++)); do
     local port=$((start_port + i))
     local ipv6="${ipv6_addresses[$i]}"
-
+    
     # Delete IPv4 INPUT rules (by port)
     nft delete rule inet proxy_accounting input tcp dport "$port" 2>/dev/null && cleaned_count=$((cleaned_count + 1)) || true
-
+    
     # Delete IPv6 rules (by address, not port!)
     if [ -n "$ipv6" ]; then
       nft delete rule inet proxy_accounting output ip6 saddr "$ipv6" 2>/dev/null && cleaned_count=$((cleaned_count + 1)) || true
       nft delete rule inet proxy_accounting input ip6 daddr "$ipv6" 2>/dev/null && cleaned_count=$((cleaned_count + 1)) || true
     fi
-
+    
     # Show progress
     if [ $((i % 100)) -eq 0 ] && [ "$i" -gt 0 ]; then
       echo "   [PROGRESS] Cleaned $i/$proxy_count proxies..."
     fi
   done
-
+  
   echo "РІСљвЂ¦ Cleaned $cleaned_count nftables rules"
-
+  
   # Save nftables state
   nft list ruleset > /etc/nftables.conf 2>/dev/null || true
 }
 
 function cleanup_iptables_rules() {
   echo "СЂСџВ§в„– Cleaning up iptables rules for ports $start_port-$last_port..."
-
+  
   local cleaned_count=0
-
+  
   for ((i=0; i<proxy_count; i++)); do
     local port=$((start_port + i))
-
+    
     # Delete iptables rules
     iptables -w 2 -D INPUT -p tcp --dport "$port" -j PROXY_ACCOUNTING 2>/dev/null && cleaned_count=$((cleaned_count + 1)) || true
     iptables -w 2 -D OUTPUT -p tcp --sport "$port" -j PROXY_ACCOUNTING 2>/dev/null && cleaned_count=$((cleaned_count + 1)) || true
     iptables -w 2 -D PROXY_ACCOUNTING -p tcp --dport "$port" -j RETURN 2>/dev/null && cleaned_count=$((cleaned_count + 1)) || true
     iptables -w 2 -D PROXY_ACCOUNTING -p tcp --sport "$port" -j RETURN 2>/dev/null && cleaned_count=$((cleaned_count + 1)) || true
-
+    
     # IPv6
     ip6tables -w 2 -D INPUT -p tcp --dport "$port" -j PROXY_ACCOUNTING 2>/dev/null && cleaned_count=$((cleaned_count + 1)) || true
     ip6tables -w 2 -D OUTPUT -p tcp --sport "$port" -j PROXY_ACCOUNTING 2>/dev/null && cleaned_count=$((cleaned_count + 1)) || true
     ip6tables -w 2 -D PROXY_ACCOUNTING -p tcp --dport "$port" -j RETURN 2>/dev/null && cleaned_count=$((cleaned_count + 1)) || true
     ip6tables -w 2 -D PROXY_ACCOUNTING -p tcp --sport "$port" -j RETURN 2>/dev/null && cleaned_count=$((cleaned_count + 1)) || true
-
+    
     # Show progress
     if [ $((i % 100)) -eq 0 ] && [ "$i" -gt 0 ]; then
       echo "   [PROGRESS] Cleaned $i/$proxy_count ports..."
     fi
   done
-
+  
   echo "РІСљвЂ¦ Cleaned $cleaned_count iptables rules"
-
+  
   # Save iptables state
   iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
   ip6tables-save > /etc/iptables/rules.v6 2>/dev/null || true
@@ -1712,11 +1702,11 @@ if [ $uninstall = true ]; then
   kill_3proxy;
   remove_ipv6_addresses_from_iface;
   close_ufw_backconnect_ports;
-
+  
   # Cleanup traffic counters (both nftables and iptables for compatibility)
   cleanup_nftables_rules;
   cleanup_iptables_rules;
-
+  
   rm -rf $proxy_dir;
   delete_file_if_exists $backconnect_proxies_file;
   echo -e "\nРІСљвЂ¦ IPv6 proxy server successfully uninstalled. If you want to reinstall, just run this script again.";
