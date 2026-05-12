@@ -129,19 +129,24 @@ NODE_URL="http://${PUBLIC_IP}:8085"
 log "    Node URL: $NODE_URL"
 
 # === 5. Register with orchestrator ===
+# Schema (orchestrator/api_schemas.py:EnrollRequest):
+#   agent_url    (required) — node-agent HTTP URL
+#   name         (optional) — human-readable name
+#   geo_code     (optional) — 2-letter country code
+#   api_key      (optional) — node-side api key (we don't use one)
+#   force        (default false) — overwrite existing entry by url
+#   auto_bind_active_skus — if true, auto-binds to SKU matching geo_code
+#                            (saves operator from manual SQL binding)
+# Auth header: X-Netrun-Api-Key (FastAPI converts underscores to dashes)
 log "5/6 Registering with orchestrator at $ORCH_URL"
 ENROLL_PAYLOAD=$(jq -n \
   --arg name "$NODE_NAME" \
-  --arg url "$NODE_URL" \
-  --arg geo "$GEO" \
-  --argjson capacity "$CAPACITY" \
-  --argjson weight "$WEIGHT" \
-  --argjson max_parallel_jobs "$MAX_PARALLEL_JOBS" \
-  --argjson max_batch_size "$MAX_BATCH_SIZE" \
-  '{name: $name, url: $url, geo: $geo, capacity: $capacity, weight: $weight, max_parallel_jobs: $max_parallel_jobs, max_batch_size: $max_batch_size}')
+  --arg agent_url "$NODE_URL" \
+  --arg geo_code "$GEO" \
+  '{name: $name, agent_url: $agent_url, geo_code: $geo_code, force: true, auto_bind_active_skus: true}')
 
 ENROLL_RESPONSE=$(curl -fsS -X POST "$ORCH_URL/v1/nodes/enroll" \
-  -H "X-API-Key: $ORCH_API_KEY" \
+  -H "X-Netrun-Api-Key: $ORCH_API_KEY" \
   -H "Content-Type: application/json" \
   -d "$ENROLL_PAYLOAD" 2>&1) || die "enrollment failed: $ENROLL_RESPONSE"
 
@@ -150,7 +155,7 @@ NODE_ID=$(echo "$ENROLL_RESPONSE" | jq -r '.id // .node_id // empty')
   echo "$ENROLL_RESPONSE" | jq .
   die "enrollment response missing node id"
 }
-ok "registered: node_id=$NODE_ID"
+ok "registered: node_id=$NODE_ID (auto-bound to ipv6_$(echo "$GEO" | tr '[:upper:]' '[:lower:]') SKU if present)"
 
 # === 6. Doctor check + summary ===
 log "6/6 Running netrun-doctor.sh"
@@ -167,23 +172,38 @@ cat <<DONE
   Node ID:  $NODE_ID
   Agent:    $NODE_URL/health
 
-\033[1;33mNEXT STEP\033[0m — bind to SKU on orchestrator (run on ORCHESTRATOR host):
+Enrollment used auto_bind_active_skus=true — if an active SKU with code
+'ipv6_$(echo "$GEO" | tr '[:upper:]' '[:lower:]')' exists on the orchestrator, refill will start filling
+the pool automatically within 30 sec.
+
+\033[1;33mOPTIONAL\033[0m — verify the binding landed (run on ORCHESTRATOR host):
+
+  sudo -u postgres psql netrun_orchestrator -c "
+    SELECT s.code, b.is_active
+    FROM sku_node_bindings b
+    JOIN skus s ON s.id = b.sku_id
+    WHERE b.node_id = '$NODE_ID';"
+
+\033[1;33mIF NO SKU EXISTS YET\033[0m for geo $GEO — create one then re-run enroll
+with --force (or manually bind):
 
   sudo -u postgres psql netrun_orchestrator <<EOF
+  INSERT INTO skus (code, geo, product_kind, duration_days, price_per_piece,
+                    target_stock, refill_batch_size, is_active)
+  VALUES ('ipv6_$(echo "$GEO" | tr '[:upper:]' '[:lower:]')', '$GEO', 'ipv6', 30, 0.14, 4000, 500, TRUE)
+  ON CONFLICT (code) DO NOTHING;
   INSERT INTO sku_node_bindings (sku_id, node_id, is_active)
   SELECT s.id, '$NODE_ID', TRUE
-  FROM skus s
-  WHERE s.code = 'ipv6_$(echo "$GEO" | tr '[:upper:]' '[:lower:]')'
+  FROM skus s WHERE s.code = 'ipv6_$(echo "$GEO" | tr '[:upper:]' '[:lower:]')'
   ON CONFLICT (sku_id, node_id) DO UPDATE SET is_active = TRUE;
   EOF
 
-After binding, refill scheduler will fill pool to capacity=$CAPACITY (~20-30 min for
-4000 ports at refill_batch_size=500). Monitor:
+Monitor pool growth on orchestrator:
 
   watch -n 5 "sudo -u postgres psql netrun_orchestrator -c \\
-    \"SELECT geo, COUNT(*) FILTER (WHERE pi.status='available') AS avail \\
+    \"SELECT n.geo, COUNT(*) FILTER (WHERE pi.status='available') AS avail \\
      FROM nodes n LEFT JOIN proxy_inventory pi ON pi.node_id = n.id \\
-     WHERE n.id = '$NODE_ID' GROUP BY geo;\""
+     WHERE n.id = '$NODE_ID' GROUP BY n.geo;\""
 
 ────────────────────────────────────────────────────────────────────────────
 DONE
