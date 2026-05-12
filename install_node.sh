@@ -314,6 +314,22 @@ write_bootstrap_marker() {
 EOF
 }
 
+ensure_legacy_root_proxyserver_symlink() {
+  # proxyyy_automated.sh hardcodes /root/proxyserver/3proxy/bin/3proxy and
+  # /root/proxyserver/.netrun_bootstrap.json as bootstrap-marker paths.
+  # Without this symlink, the script logs BOOTSTRAP_NOT_READY and refill
+  # fails with generator_exit_1 on every fresh node (incident 2026-05-12,
+  # Frankfurt enrollment). Older nodes (Mumbai, Tokyo, ...) had this
+  # symlink manually applied during the original incident recovery —
+  # bake it into the installer so all new nodes get it from the start.
+  log "Linking /root/proxyserver -> $PROXY_ROOT (legacy script compat)"
+  if [ -e /root/proxyserver ] && [ ! -L /root/proxyserver ]; then
+    log "WARNING: /root/proxyserver exists as a directory, leaving alone"
+    return 0
+  fi
+  ln -sfn "$PROXY_ROOT" /root/proxyserver
+}
+
 install_systemd_service() {
   local template="$NETRUN_HOME/deploy/node/netrun-node-agent.service.template"
   [ -f "$template" ] || die "service_template_not_found: $template"
@@ -546,6 +562,7 @@ main() {
   configure_sysctl
   configure_nftables
   write_bootstrap_marker
+  ensure_legacy_root_proxyserver_symlink
   install_systemd_service
 
   # === Boot-time auto-recovery (run AFTER node-agent so we know the binary works) ===
