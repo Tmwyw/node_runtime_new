@@ -154,6 +154,12 @@ install_runtime_files() {
 # === CHANGE 1: kernel.pid_max + threads-max added ===
 configure_sysctl() {
   log "Configuring sysctl (IPv6 forwarding + raised kernel pid/thread limits)"
+  # nf_conntrack module is lazy-loaded by nftables; on a freshly-cleaned node
+  # (clean_node.sh deletes nft tables) the /proc/sys/net/netfilter/* keys do
+  # not exist yet, so `sysctl -p` exits non-zero and `set -e` kills the script.
+  # Force-load conntrack so the keys are present, and tolerate sysctl warnings.
+  modprobe nf_conntrack 2>/dev/null || true
+  modprobe nf_conntrack_ipv6 2>/dev/null || true
   cat > "$SYSCTL_FILE" <<'EOF'
 # === IPv6 forwarding ===
 net.ipv6.ip_nonlocal_bind = 1
@@ -178,7 +184,8 @@ fs.file-max = 2097152
 net.ipv6.conf.all.accept_ra = 2
 net.ipv6.conf.default.accept_ra = 2
 EOF
-  sysctl -p "$SYSCTL_FILE" >/dev/null
+  # Tolerate "cannot stat" warnings (e.g. if a netfilter key still not exposed)
+  sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1 || sysctl -p "$SYSCTL_FILE" || true
 }
 
 configure_file_limits() {
