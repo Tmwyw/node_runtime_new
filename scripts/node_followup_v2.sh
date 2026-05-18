@@ -169,23 +169,40 @@ LimitNPROC=infinity
 WantedBy=multi-user.target
 EOF
 
-# ── 4) Install netrun-watchdog (timer + service) — no reboot ────
-log "Installing netrun-watchdog (v2 — restarts node-agent, never reboots)"
+# ── 4) Install netrun-watchdog v3 (two-tier: restart, then reboot) ────
+log "Installing netrun-watchdog (v3 — restart-then-reboot for Vultr abuse-block)"
 
 WATCHDOG_SCRIPT="/opt/netrun/scripts/watchdog_probe.sh"
 mkdir -p /var/lib/netrun
 
 cat > "$WATCHDOG_SCRIPT" <<'WATCHDOG'
 #!/usr/bin/env bash
-# v2 watchdog. On 5 consecutive /health failures: restart node-agent.
-# v1 rebooted node — caused daily reboot loops, see incident 2026-05-15.
-# Adds 10-min cooldown between restarts so we don't restart-loop.
+# v3 watchdog with two tiers (Incident 2026-05-18 finding):
+#
+#   Tier 1: RESTART_THRESHOLD (5) consecutive /health fails →
+#           `systemctl restart netrun-node-agent`.
+#           Cooldown 10 min between restarts.
+#           Lечит локальные зависания node-agent.
+#
+#   Tier 2: REBOOT_THRESHOLD (20) consecutive fails — i.e. ~20 min
+#           continuous downtime → `reboot`.
+#           Cooldown 4 hours between reboots.
+#           Lечит Vultr abuse-network-block (VM Running но сетка blocked,
+#           SSH/8085 unreachable извне; reboot снимает block).
+#
+# v1 (rebooted at 3 fails) — too aggressive, daily reboots.
+# v2 (restart only, no reboot) — Vultr-block остаётся, ноды лежат намертво.
+# v3 (restart + reboot fallback) — компромисс: локальные зависания и
+# Vultr-block обрабатываются разной механикой.
 set -u
 STATE_FAIL="/var/lib/netrun/watchdog_failures"
-STATE_LAST="/var/lib/netrun/watchdog_last_restart"
+STATE_LAST_RESTART="/var/lib/netrun/watchdog_last_restart"
+STATE_LAST_REBOOT="/var/lib/netrun/watchdog_last_reboot"
 LOG_TAG="netrun-watchdog"
-THRESHOLD=5
-COOLDOWN_SEC=600
+RESTART_THRESHOLD=5
+RESTART_COOLDOWN_SEC=600
+REBOOT_THRESHOLD=20
+REBOOT_COOLDOWN_SEC=14400
 PROBE_TIMEOUT=5
 
 current=$(cat "$STATE_FAIL" 2>/dev/null || echo 0)
@@ -202,34 +219,55 @@ fi
 
 new=$((current + 1))
 echo "$new" > "$STATE_FAIL"
-logger -t "$LOG_TAG" "probe failed ($new/$THRESHOLD)"
+logger -t "$LOG_TAG" "probe failed ($new fails — restart@$RESTART_THRESHOLD, reboot@$REBOOT_THRESHOLD)"
 
-if [ "$new" -lt "$THRESHOLD" ]; then
-  exit 0
-fi
-
-# At/over threshold — but respect cooldown
 now=$(date +%s)
-last=$(cat "$STATE_LAST" 2>/dev/null || echo 0)
-last=${last//[^0-9]/}
-: "${last:=0}"
-elapsed=$((now - last))
 
-if [ "$elapsed" -lt "$COOLDOWN_SEC" ]; then
-  logger -t "$LOG_TAG" "threshold reached but in cooldown ($elapsed/${COOLDOWN_SEC}s) — waiting"
+# ── Tier 2: REBOOT after $REBOOT_THRESHOLD continuous failures ──
+if [ "$new" -ge "$REBOOT_THRESHOLD" ]; then
+  last_reboot=$(cat "$STATE_LAST_REBOOT" 2>/dev/null || echo 0)
+  last_reboot=${last_reboot//[^0-9]/}
+  : "${last_reboot:=0}"
+  elapsed=$((now - last_reboot))
+
+  if [ "$elapsed" -ge "$REBOOT_COOLDOWN_SEC" ]; then
+    logger -t "$LOG_TAG" "REBOOT — $REBOOT_THRESHOLD consecutive /health failures (~$(( new * 60 / 60 )) min downtime), last reboot ${elapsed}s ago"
+    echo "$now" > "$STATE_LAST_REBOOT"
+    echo 0 > "$STATE_FAIL"
+    /sbin/reboot
+    exit 0
+  else
+    logger -t "$LOG_TAG" "reboot threshold reached but in cooldown ($elapsed/${REBOOT_COOLDOWN_SEC}s) — waiting"
+    exit 0
+  fi
+fi
+
+# ── Tier 1: RESTART netrun-node-agent after $RESTART_THRESHOLD failures ──
+if [ "$new" -lt "$RESTART_THRESHOLD" ]; then
   exit 0
 fi
 
-logger -t "$LOG_TAG" "RESTART netrun-node-agent — $THRESHOLD consecutive /health failures"
-echo "$now" > "$STATE_LAST"
-echo 0 > "$STATE_FAIL"
+last_restart=$(cat "$STATE_LAST_RESTART" 2>/dev/null || echo 0)
+last_restart=${last_restart//[^0-9]/}
+: "${last_restart:=0}"
+elapsed=$((now - last_restart))
+
+if [ "$elapsed" -lt "$RESTART_COOLDOWN_SEC" ]; then
+  logger -t "$LOG_TAG" "restart threshold reached but in cooldown ($elapsed/${RESTART_COOLDOWN_SEC}s) — waiting"
+  exit 0
+fi
+
+logger -t "$LOG_TAG" "RESTART netrun-node-agent — $RESTART_THRESHOLD consecutive /health failures"
+echo "$now" > "$STATE_LAST_RESTART"
+# Note: do NOT reset STATE_FAIL here — let it keep counting up to REBOOT_THRESHOLD
+# in case restart didn't help (i.e. Vultr-block, not local hang).
 systemctl restart netrun-node-agent || logger -t "$LOG_TAG" "systemctl restart failed: $?"
 WATCHDOG
 chmod +x "$WATCHDOG_SCRIPT"
 
 cat > /etc/systemd/system/netrun-watchdog.service <<EOF
 [Unit]
-Description=NETRUN — local /health watchdog (restarts node-agent on $((5)) consecutive failures)
+Description=NETRUN — /health watchdog (v3: restart-then-reboot tier)
 After=netrun-node-agent.service
 
 [Service]
