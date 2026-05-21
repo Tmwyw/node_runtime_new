@@ -13,8 +13,12 @@ Environment=NODE_AGENT_JOBS_ROOT=/opt/netrun/jobs
 ExecStart=/usr/bin/node /opt/netrun/node_runtime/node_agent/server.js
 Restart=always
 RestartSec=3
-LimitNOFILE=262144
-TasksMax=32768
+# Raised limits (incident 2026-05-18): 4000+ 3proxy children need infinity.
+# Default TasksMax=32768 caused fork-rejected → node hangs. install_node_v2.sh
+# also lays a drop-in override; this is the baseline so a bare template is safe too.
+LimitNOFILE=1048576
+LimitNPROC=infinity
+TasksMax=infinity
 
 [Install]
 WantedBy=multi-user.target
