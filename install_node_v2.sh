@@ -245,8 +245,14 @@ EOF
 
 configure_nftables() {
   log "Configuring nftables"
-  systemctl enable nftables >/dev/null
-  systemctl start nftables >/dev/null
+  # Fresh Ubuntu 24.04 (Vultr image) ships UFW whose rules use xtables-compat
+  # (`xt match "icmp6"`). After `apt purge ufw` those rules linger in the live
+  # ruleset; `nft list ruleset > /etc/nftables.conf` then writes xt-compat
+  # expressions that a pure `nft -f` CANNOT parse → `systemctl start nftables`
+  # crashes → set -e kills the installer (incident 2026-05-22, Tokyo fresh test).
+  # Flush the inherited ruleset first so we install ONLY our accounting tables.
+  nft flush ruleset 2>/dev/null || true
+  systemctl enable nftables >/dev/null 2>&1 || true
   nft add table inet proxy_normalization 2>/dev/null || true
   nft add chain inet proxy_normalization output '{ type filter hook output priority -150; policy accept; }' 2>/dev/null || true
   nft add chain inet proxy_normalization postrouting '{ type filter hook postrouting priority -150; policy accept; }' 2>/dev/null || true
@@ -254,7 +260,9 @@ configure_nftables() {
   nft add chain inet proxy_accounting input '{ type filter hook input priority 0; policy accept; }' 2>/dev/null || true
   nft add chain inet proxy_accounting output '{ type filter hook output priority 0; policy accept; }' 2>/dev/null || true
   nft add rule inet proxy_normalization output meta l4proto tcp tcp flags syn tcp option maxseg size set 1340 2>/dev/null || true
+  # Now ruleset has ONLY our tables (no xt-compat) → valid for nft -f on boot
   nft list ruleset > /etc/nftables.conf
+  systemctl restart nftables 2>/dev/null || systemctl start nftables 2>/dev/null || true
 }
 
 write_bootstrap_marker() {
