@@ -28,10 +28,15 @@ const DEFAULT_FINGERPRINT_PROFILE_VERSION = (
   String(process.env.NODE_AGENT_DEFAULT_FINGERPRINT_PROFILE_VERSION || "v2_android_ipv6_only_dns_custom").trim()
   || "v2_android_ipv6_only_dns_custom"
 );
-const PRODUCTION_FINGERPRINT_PROFILE_VERSION = "v2_android_ipv6_only_dns_custom";
+const PRODUCTION_FINGERPRINT_PROFILE_VERSION = (
+  String(process.env.NODE_AGENT_FINGERPRINT_PROFILE_VERSION || "v2_android_ipv6_only_dns_custom").trim()
+  || "v2_android_ipv6_only_dns_custom"
+);
 const PRODUCTION_INTENDED_CLIENT_OS_PROFILE = "android_mobile";
 const PRODUCTION_REQUIRED_NETWORK_PROFILE = "high_compatibility";
-const PRODUCTION_REQUIRED_IPV6_POLICY = "ipv6_only";
+const ALLOWED_IPV6_POLICIES = new Set(["ipv6_only", "strict_dual_stack", "ipv6_required"]);
+const _envIpv6Policy = String(process.env.NODE_AGENT_REQUIRED_IPV6_POLICY || "ipv6_only").trim().toLowerCase();
+const PRODUCTION_REQUIRED_IPV6_POLICY = ALLOWED_IPV6_POLICIES.has(_envIpv6Policy) ? _envIpv6Policy : "ipv6_only";
 const PRODUCTION_IPV6_ROLLOUT_STAGE = "enforced";
 const PRODUCTION_CLIENT_OS_PROFILE_ENFORCEMENT = "not_controlled_by_proxy";
 const PRODUCTION_EFFECTIVE_CLIENT_PROFILE = "not_controlled_by_proxy";
