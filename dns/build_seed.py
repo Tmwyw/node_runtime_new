@@ -46,13 +46,19 @@ CONTINENT_UPTIME_TIERS = (95.0, 90.0)
 # outage doesn't take the whole continent down at once.
 CONTINENT_PER_ORG_CAP = 2
 
-# Global public-DNS brand blocklist (case-insensitive substring match against
-# `organization`). Resolvers from these orgs are recognizable as datacenter
-# DNS — the whole point of per-country geo-local DNS is to look like a
-# residential ISP resolver, NOT like another big public anycast. Brands stay
-# in the `global` tier as last-resort fallback only.
+# Global public-DNS brand + big-cloud/CDN blocklist (case-insensitive
+# substring match against `organization`). Resolvers from these orgs are
+# recognizable as datacenter DNS — per-country geo-local DNS must look like
+# a residential/regional ISP resolver, NOT another big public anycast or
+# hyperscaler cloud egress.
+#
+# Regional hosters (Hetzner, Vultr, Strato, First Colo, OVH, Falco, WorldStream,
+# meerfarbig, ATM, …) are intentionally NOT in the blocklist — they're geo-local
+# enough to read as "local hosting/ISP" and dropping them would empty several
+# country lists. The blocklist targets only globally-recognizable brands.
 BRAND_BLOCKLIST = (
-    "google",
+    # Public DNS brands
+    "google",           # also catches "Google Cloud"
     "cloudflare",
     "opendns",
     "cisco",            # Cisco OpenDNS
@@ -70,6 +76,18 @@ BRAND_BLOCKLIST = (
     "comodo",
     "hurricane",        # Hurricane Electric (HE)
     "he.net",
+    # Big cloud / CDN (hyperscalers + global CDN edge)
+    "akamai",
+    "fastly",
+    "amazon",
+    "aws",              # catches "AWS EC2 …" org strings
+    "oracle cloud",
+    "google cloud",     # redundant with "google" but explicit
+    "ibm cloud",
+    "microsoft",
+    "azure",
+    "digitalocean",
+    "linode",
 )
 
 # Anycast global fallback — hardcoded, NOT from upstream directory.
