@@ -5,6 +5,11 @@
 # script just produces a static, repo-bundled seed so nodes never reach out
 # to an untrusted source at proxy-spawn time.
 #
+# Per-country resolvers MUST be geo-local non-anycast (residential-looking),
+# NOT global public-DNS brands — proxying through Cloudflare/Google/Quad9
+# from a "Polish residential IP" is as obvious as proxying through 1.1.1.1.
+# Global brands are confined to the `global` fallback tier ONLY.
+#
 # Run:  python dns/build_seed.py
 # Out:  dns/seed.json + coverage stats to stdout.
 
@@ -28,16 +33,50 @@ PER_COUNTRY_V6 = 4
 PER_CONTINENT_V4 = 16
 PER_CONTINENT_V6 = 8
 
-# Country is "thin" if fewer than this many resolvers survive the strict filter.
+# Country is "thin" if fewer than this many resolvers survive filtering.
 THIN_COUNTRY_THRESHOLD = 2
 
-# Cascading uptime thresholds: try strict first, relax for thin countries.
-UPTIME_TIERS = (99.0, 95.0, 90.0, 0.0)
+# Per-country uptime tiers (relaxes only if a country can't fill THRESHOLD).
+COUNTRY_UPTIME_TIERS = (99.0, 95.0, 90.0)
 
-# Anycast global fallback — hardcoded, NOT from the upstream directory.
-# Quad9 secure + OpenDNS. Both are widely trusted, multi-AS anycast,
-# and survive country-level censorship better than 1.1.1.1 / 8.8.8.8
-# (which carriers in TR/RU/CN routinely intercept).
+# Continent uptime tiers (middle of country→continent→global cascade).
+CONTINENT_UPTIME_TIERS = (95.0, 90.0)
+
+# At most this many IPs per organization in the continent layer — so one AS
+# outage doesn't take the whole continent down at once.
+CONTINENT_PER_ORG_CAP = 2
+
+# Global public-DNS brand blocklist (case-insensitive substring match against
+# `organization`). Resolvers from these orgs are recognizable as datacenter
+# DNS — the whole point of per-country geo-local DNS is to look like a
+# residential ISP resolver, NOT like another big public anycast. Brands stay
+# in the `global` tier as last-resort fallback only.
+BRAND_BLOCKLIST = (
+    "google",
+    "cloudflare",
+    "opendns",
+    "cisco",            # Cisco OpenDNS
+    "quad9",
+    "adguard",
+    "verisign",
+    "neustar",
+    "level 3",
+    "lumen",
+    "centurylink",
+    "cleanbrowsing",
+    "controld",
+    "nextdns",
+    "dns.watch",
+    "comodo",
+    "hurricane",        # Hurricane Electric (HE)
+    "he.net",
+)
+
+# Anycast global fallback — hardcoded, NOT from upstream directory.
+# Quad9 secure + Cisco OpenDNS. Both are widely-deployed multi-AS anycast,
+# and survive country-level censorship better than 1.1.1.1 / 8.8.8.8 (which
+# carriers in TR/RU/CN routinely intercept). These ARE recognizable brands —
+# global tier is the conscious "give up on stealth" fallback.
 GLOBAL_FALLBACK = {
     "v4": [
         "9.9.9.9",
@@ -88,21 +127,30 @@ def uptime(r: dict, window: str) -> float:
         return 0.0
 
 
+def is_brand(r: dict) -> bool:
+    org = (r.get("organization") or "").lower()
+    if not org:
+        return False
+    return any(kw in org for kw in BRAND_BLOCKLIST)
+
+
+def dnssec_validating(r: dict) -> bool:
+    return bool((r.get("dnssec") or {}).get("validating"))
+
+
 def score_key(r: dict) -> tuple:
-    # Sort descending; higher is better. Tuples compare lexicographically.
+    # Sort descending; higher is better. Tuple compared lexicographically.
+    # Trusted-first removed: that priority pulled global anycast brands
+    # (Google/Quad9/OpenDNS) into per-country lists, defeating the geo-local
+    # stealth goal. DNSSEC-validating preferred for safety against DNS hijack.
     return (
-        1 if r.get("trusted") else 0,
+        1 if dnssec_validating(r) else 0,
         uptime(r, "30d"),
         uptime(r, "90d"),
         uptime(r, "1y"),
         uptime(r, "24h"),
+        1 if not r.get("anycast") else 0,  # mild tiebreak: prefer non-anycast
     )
-
-
-def passes_tier(r: dict, min_uptime: float, require_trusted: bool) -> bool:
-    if require_trusted and not r.get("trusted"):
-        return False
-    return uptime(r, "30d") >= min_uptime
 
 
 def select_for_country(
@@ -110,30 +158,26 @@ def select_for_country(
     ip_version: int,
     cap: int,
 ) -> tuple[list[str], str]:
-    """Return (ip_list, tier_label_used). Empty list => country is thin."""
-    pool = [r for r in resolvers if r.get("version") == ip_version]
+    """Return (ip_list, tier_label). Empty list ⇒ no local resolvers; node
+    will cascade to continent/global at selection time."""
+    pool = [
+        r for r in resolvers
+        if r.get("version") == ip_version and not is_brand(r)
+    ]
     if not pool:
         return [], "empty"
 
-    # Try tiers: (trusted, uptime>=99) → (trusted, uptime>=95) →
-    #           (trusted, uptime>=90) → (any, uptime>=99) → (any, uptime>=95) → (any, anything)
-    attempts = [
-        (True, 99.0, "trusted+99"),
-        (True, 95.0, "trusted+95"),
-        (True, 90.0, "trusted+90"),
-        (False, 99.0, "any+99"),
-        (False, 95.0, "any+95"),
-        (False, 0.0, "any"),
-    ]
-    for require_trusted, min_uptime, label in attempts:
-        survivors = [r for r in pool if passes_tier(r, min_uptime, require_trusted)]
+    for min_uptime in COUNTRY_UPTIME_TIERS:
+        survivors = [r for r in pool if uptime(r, "30d") >= min_uptime]
         if len(survivors) >= THIN_COUNTRY_THRESHOLD:
             survivors.sort(key=score_key, reverse=True)
-            return [r["ip"] for r in survivors[:cap]], label
-    # Last resort — anything in the pool, even 0% uptime, sorted by score.
+            return [r["ip"] for r in survivors[:cap]], f"local+{int(min_uptime)}"
+
+    # All uptime tiers exhausted but pool is non-empty — return what we have
+    # (best by score) up to THRESHOLD-1, label as "local+weak".
     pool.sort(key=score_key, reverse=True)
     if pool:
-        return [r["ip"] for r in pool[:cap]], "fallback"
+        return [r["ip"] for r in pool[:cap]], "local+weak"
     return [], "empty"
 
 
@@ -142,28 +186,25 @@ def select_for_continent(
     ip_version: int,
     cap: int,
 ) -> list[str]:
-    # Continent is the middle tier of the country→continent→global cascade.
-    # Don't gate on trusted=true here: upstream has only 13 trusted entries
-    # globally, so a trusted-only filter starves AF/AS/SA continents to 0.
-    # Sort by score_key (which still prefers trusted first), then uptime.
     pool = [
-        r
-        for r in resolvers
-        if r.get("version") == ip_version and uptime(r, "30d") >= 95.0
+        r for r in resolvers
+        if r.get("version") == ip_version and not is_brand(r)
     ]
-    if not pool:
-        # Relax to >=90% if 95% gate empties the continent (rare but possible
-        # for small / under-monitored continents).
-        pool = [r for r in resolvers if r.get("version") == ip_version and uptime(r, "30d") >= 90.0]
-    pool.sort(key=score_key, reverse=True)
-    # Diversify by organization — at most 2 IPs per org so a single AS outage
-    # doesn't take the whole continent down at once.
-    per_org_cap = 2
+    survivors: list[dict] = []
+    for min_uptime in CONTINENT_UPTIME_TIERS:
+        survivors = [r for r in pool if uptime(r, "30d") >= min_uptime]
+        if survivors:
+            break
+    if not survivors:
+        survivors = pool
+    survivors.sort(key=score_key, reverse=True)
+
+    # Diversify by organization — at most CONTINENT_PER_ORG_CAP IPs per org.
     seen_org: dict[str, int] = {}
     picked: list[str] = []
-    for r in pool:
+    for r in survivors:
         org = (r.get("organization") or "").strip().lower() or "_unknown"
-        if seen_org.get(org, 0) >= per_org_cap:
+        if seen_org.get(org, 0) >= CONTINENT_PER_ORG_CAP:
             continue
         seen_org[org] = seen_org.get(org, 0) + 1
         picked.append(r["ip"])
@@ -186,13 +227,16 @@ def build_seed(directory: dict) -> tuple[dict, dict]:
             by_continent.setdefault(kc, []).append(r)
 
     countries_out: dict[str, dict] = {}
-    thin_countries: list[tuple[str, str, str]] = []  # (cc, v4_tier, v6_tier)
+    no_local_v4: list[str] = []      # countries falling through to continent/global
+    weak_v4: list[tuple[str, str]] = []   # countries with degraded tier (local+weak)
     for cc, pool in sorted(by_country.items()):
         v4, t4 = select_for_country(pool, 4, PER_COUNTRY_V4)
         v6, t6 = select_for_country(pool, 6, PER_COUNTRY_V6)
         countries_out[cc] = {"v4": v4, "v6": v6}
-        if len(v4) < THIN_COUNTRY_THRESHOLD or t4 in ("any", "fallback", "empty"):
-            thin_countries.append((cc, t4, t6))
+        if not v4:
+            no_local_v4.append(cc)
+        elif t4 == "local+weak":
+            weak_v4.append((cc, t4))
 
     continents_out: dict[str, dict] = {}
     for kc, pool in sorted(by_continent.items()):
@@ -212,8 +256,11 @@ def build_seed(directory: dict) -> tuple[dict, dict]:
             "per_country_v6": PER_COUNTRY_V6,
             "per_continent_v4": PER_CONTINENT_V4,
             "per_continent_v6": PER_CONTINENT_V6,
-            "preferred": "trusted=true AND uptime_30d>=99%, tiebreak uptime_90d/1y",
             "thin_country_threshold": THIN_COUNTRY_THRESHOLD,
+            "selection": "non-brand orgs only; uptime_30d cascade 99→95→90; "
+                         "prefer DNSSEC validating, then uptime windows; "
+                         "global anycast brands confined to `global` tier",
+            "brand_blocklist": list(BRAND_BLOCKLIST),
         },
         "countries": countries_out,
         "continents": continents_out,
@@ -224,7 +271,8 @@ def build_seed(directory: dict) -> tuple[dict, dict]:
         "countries_present": len(countries_out),
         "countries_with_v4": sum(1 for c in countries_out.values() if c["v4"]),
         "countries_with_v6": sum(1 for c in countries_out.values() if c["v6"]),
-        "countries_thin": thin_countries,
+        "countries_no_local_v4": no_local_v4,
+        "countries_weak_v4": weak_v4,
         "continents_present": len(continents_out),
         "total_v4_picked": sum(len(c["v4"]) for c in countries_out.values()),
         "total_v6_picked": sum(len(c["v6"]) for c in countries_out.values()),
@@ -232,11 +280,18 @@ def build_seed(directory: dict) -> tuple[dict, dict]:
     return seed, stats
 
 
-def print_coverage(seed: dict, stats: dict, out_path: str) -> None:
+def _resolver_index(directory: dict) -> dict[str, dict]:
+    """Map IP → resolver record, for orgs/uptime annotation in reports."""
+    return {r["ip"]: r for r in directory.get("resolvers", []) if r.get("ip")}
+
+
+def print_coverage(seed: dict, stats: dict, directory: dict, out_path: str) -> None:
+    idx = _resolver_index(directory)
+
     print()
-    print("=" * 72)
-    print(f"  NETRUN DNS seed — coverage report")
-    print("=" * 72)
+    print("=" * 78)
+    print("  NETRUN DNS seed — coverage report")
+    print("=" * 78)
     print(f"  source              : {seed['source']}")
     print(f"  upstream generated  : {seed.get('upstream_generated_at') or 'n/a'}")
     print(f"  fetched_at          : {seed['fetched_at']}")
@@ -247,33 +302,54 @@ def print_coverage(seed: dict, stats: dict, out_path: str) -> None:
     print(f"  continents present  : {stats['continents_present']}")
     print(f"  total v4 picked     : {stats['total_v4_picked']:,}")
     print(f"  total v6 picked     : {stats['total_v6_picked']:,}")
-    print(f"  thin countries      : {len(stats['countries_thin'])}"
-          f"  (fell back below trusted+30d>=99%)")
+    print(f"  countries no-local  : {len(stats['countries_no_local_v4'])}"
+          f"  (fall through to continent/global)")
+    print(f"  countries weak v4   : {len(stats['countries_weak_v4'])}"
+          f"  (uptime < 90% — degraded)")
     print()
-    print("  --- Sold geos -------------------------------------------------")
-    print("  CC    v4   v6  | sample v4                  sample v6")
-    print("  ----  ---  --- | -------------------------  ---------------------")
+
+    print("  --- Sold geos (each resolver with its org) ---------------------------------")
     for cc in SOLD_GEOS:
         rec = seed["countries"].get(cc, {"v4": [], "v6": []})
         v4 = rec["v4"]
         v6 = rec["v6"]
-        sv4 = v4[0] if v4 else "(none)"
-        sv6 = v6[0] if v6 else "(none)"
-        print(f"  {cc:<4}  {len(v4):>3}  {len(v6):>3} | {sv4:<25}  {sv6}")
+        print(f"  [{cc}]  v4={len(v4)}  v6={len(v6)}")
+        for ip in v4:
+            r = idx.get(ip, {})
+            org = r.get("organization") or "(?)"
+            up30 = uptime(r, "30d")
+            dnssec = "DNSSEC" if dnssec_validating(r) else "      "
+            print(f"        {ip:<18} {dnssec}  up30d={up30:6.2f}%  {org}")
+        if not v4:
+            print("        (no local v4 — uses continent/global fallback)")
+        if v6:
+            for ip in v6:
+                r = idx.get(ip, {})
+                print(f"        {ip:<24}  {r.get('organization') or '(?)'}")
     print()
-    print("  --- Continents ------------------------------------------------")
+
+    print("  --- Continents -------------------------------------------------------------")
     print("  KC    v4   v6")
     print("  ----  ---  ---")
     for kc, rec in sorted(seed["continents"].items()):
         print(f"  {kc:<4}  {len(rec['v4']):>3}  {len(rec['v6']):>3}")
     print()
+
+    if stats["countries_no_local_v4"]:
+        print("  --- Countries with NO local v4 (cascade to continent/global) --------------")
+        # Wrap output for readability.
+        ccs = stats["countries_no_local_v4"]
+        for i in range(0, len(ccs), 20):
+            print("    " + " ".join(ccs[i:i+20]))
+        print()
+
     print(f"  output              : {out_path}")
     try:
         size = os.path.getsize(out_path)
         print(f"  seed.json size      : {size:,} bytes ({size / 1024:.1f} KB)")
     except OSError:
         pass
-    print("=" * 72)
+    print("=" * 78)
 
 
 def main() -> int:
@@ -287,11 +363,18 @@ def main() -> int:
         json.dump(seed, f, ensure_ascii=False, indent=2, sort_keys=True)
         f.write("\n")
 
-    print_coverage(seed, stats, out_path)
+    print_coverage(seed, stats, directory, out_path)
 
     missing_sold = [cc for cc in SOLD_GEOS if not seed["countries"].get(cc, {}).get("v4")]
     if missing_sold:
         print(f"\n[WARN] sold geos with ZERO v4 resolvers: {missing_sold}", file=sys.stderr)
+    under_threshold_sold = [
+        cc for cc in SOLD_GEOS
+        if len(seed["countries"].get(cc, {}).get("v4", [])) < THIN_COUNTRY_THRESHOLD
+    ]
+    if under_threshold_sold:
+        print(f"\n[WARN] sold geos with < {THIN_COUNTRY_THRESHOLD} local v4: "
+              f"{under_threshold_sold}", file=sys.stderr)
     return 0
 
 
