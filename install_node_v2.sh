@@ -244,7 +244,10 @@ EOF
 }
 
 pin_dns_resolvers() {
-  log "Pinning /etc/resolv.conf"
+  # Install-time resolver: fast public DNS so apt/git work during setup.
+  # configure_unbound() re-points resolv.conf to the local recursive resolver
+  # (127.0.0.1) at the end — that's the production state (see below).
+  log "Pinning /etc/resolv.conf (install-time upstreams)"
   chattr -i "$RESOLV_CONF" 2>/dev/null || true
   cat > "$RESOLV_CONF" <<'EOF'
 nameserver 1.1.1.1
@@ -254,6 +257,55 @@ nameserver 2001:4860:4860::8888
 options edns0 trust-ad timeout:2 attempts:1
 EOF
   chattr +i "$RESOLV_CONF" 2>/dev/null || true
+}
+
+# Local recursive resolver so proxy DNS egresses from THIS node (resolver IP ==
+# exit IP, geo/ASN-consistent) instead of leaking to Cloudflare/Google.
+# NOTE: this 3proxy build IGNORES the `nserver` directive and resolves via
+# /etc/resolv.conf — so the real lever is resolv.conf, not the cfg nserver lines.
+configure_unbound() {
+  log "Installing local recursive resolver (unbound)"
+  DEBIAN_FRONTEND=noninteractive apt-get install -y unbound >/dev/null 2>&1 \
+    || { apt-get update -qq; DEBIAN_FRONTEND=noninteractive apt-get install -y unbound >/dev/null 2>&1; }
+  mkdir -p /etc/unbound/unbound.conf.d
+  cat > /etc/unbound/unbound.conf.d/netrun.conf <<'EOF'
+server:
+    interface: 127.0.0.1
+    interface: ::1
+    access-control: 127.0.0.0/8 allow
+    access-control: ::1 allow
+    do-ip6: yes
+    num-threads: 4
+    msg-cache-size: 128m
+    rrset-cache-size: 256m
+    cache-min-ttl: 60
+    prefetch: yes
+    qname-minimisation: yes
+    hide-identity: yes
+    hide-version: yes
+EOF
+  if ! unbound-checkconf >/dev/null 2>&1; then
+    warn "unbound-checkconf failed — keeping upstream resolv.conf (no local resolver)"
+    return 0
+  fi
+  systemctl enable unbound >/dev/null 2>&1 || true
+  systemctl restart unbound || true
+  sleep 1
+  if ! systemctl is-active --quiet unbound; then
+    warn "unbound not active — keeping upstream resolv.conf"
+    return 0
+  fi
+  # Re-point resolv.conf to the local resolver. 1.1.1.1 stays as LAST-RESORT
+  # fallback so the node never loses DNS if unbound dies (degraded > broken).
+  chattr -i "$RESOLV_CONF" 2>/dev/null || true
+  cat > "$RESOLV_CONF" <<'EOF'
+nameserver 127.0.0.1
+nameserver ::1
+nameserver 1.1.1.1
+options edns0 trust-ad timeout:2 attempts:1
+EOF
+  chattr +i "$RESOLV_CONF" 2>/dev/null || true
+  log "unbound active; resolv.conf -> 127.0.0.1 (recursion egress = node IP)"
 }
 
 configure_nftables() {
@@ -492,6 +544,7 @@ main() {
   configure_colored_prompt
 
   install_os_dependencies
+  configure_unbound
   install_nodejs_20_if_needed
   copy_repo_to_opt
   install_runtime_files
