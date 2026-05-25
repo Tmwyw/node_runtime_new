@@ -82,9 +82,9 @@ ipv6_policy="strict_dual_stack"
 proxy_maxconn=200
 proxy_count=1
 dns_selected_country="fallback"
-dns_selected_servers_csv="9.9.9.9,149.112.112.112"
-dns_selection_strategy="fallback_global"
-dns_nserver_lines=$'  nserver 9.9.9.9\n  nserver 149.112.112.112'
+dns_selected_servers_csv="127.0.0.1,::1"
+dns_selection_strategy="local_unbound"
+dns_nserver_lines=$'  nserver 127.0.0.1\n  nserver ::1'
 tls_clienthello_mode="passthrough"
 bootstrap_only=false
 runtime_only=false
@@ -570,38 +570,16 @@ function configure_dns_servers() {
     fi;
   fi;
 
-  # --- Resolve country code (uppercase) ---
-  local resolved_country="$dns_country"
-  if [ "$resolved_country" = "auto" ]; then
-    resolved_country=$(detect_country_code_by_ip "$backconnect_ipv4" || true)
-  fi;
-  resolved_country=$(echo "$resolved_country" | tr '[:lower:]' '[:upper:]')
-  echo "   Country for DNS selection: ${resolved_country:-unknown}"
-
-  # --- Load shared selector (locate_dns_seed + dns_select_pair) ---
-  if ! source_dns_selector_or_die; then
-    echo "   WARNING: dns/select_dns.sh not found — keeping fallback Quad9 defaults"
-    return
-  fi;
-
-  # --- Deterministic selection (rotation_key = instance_id == start_port) ---
-  local sel_output=""
-  sel_output=$(dns_select_pair "${resolved_country}" "${instance_id}")
-  local pick1; pick1=$(printf '%s' "$sel_output" | sed -n '1p')
-  local pick2; pick2=$(printf '%s' "$sel_output" | sed -n '2p')
-  local strategy; strategy=$(printf '%s' "$sel_output" | sed -n '3p')
-
-  if [ -z "$pick1" ] || [ -z "$pick2" ]; then
-    echo "   WARNING: dns_select_pair returned empty — keeping fallback Quad9 defaults"
-    return
-  fi;
-
-  dns_nserver_lines="  nserver ${pick1}"$'\n'"  nserver ${pick2}"
-  dns_selected_country="${resolved_country:-fallback}"
-  dns_selected_servers_csv="${pick1},${pick2}"
-  dns_selection_strategy="$strategy"
-
-  echo "   DNS selected (${dns_selected_country}, ${dns_selection_strategy}, instance_id=${instance_id}): ${dns_selected_servers_csv}"
+  # --- Default: local recursive resolver (unbound on 127.0.0.1) ---
+  # This 3proxy build honors the cfg `nserver`, and every node runs a local
+  # unbound (install_node_v2 → configure_unbound). Pointing nserver at it makes
+  # DNS egress from the node itself (resolver IP == exit IP) — no Cloudflare /
+  # third-party leak, geo/ASN-consistent. Override with --dns-servers if needed.
+  dns_nserver_lines="  nserver 127.0.0.1"$'\n'"  nserver ::1"
+  dns_selected_country="local"
+  dns_selected_servers_csv="127.0.0.1,::1"
+  dns_selection_strategy="local_unbound"
+  echo "   DNS selected (local_unbound): 127.0.0.1, ::1"
 }
 
 function get_backconnect_ipv4() {
