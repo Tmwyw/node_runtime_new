@@ -80,4 +80,54 @@ Cloudflare.
 
 ## Journal
 
-* (заполняется по ходу)
+* **Stage 0** — `wave/node-mgmt-2-agent` от `new/main` (`f193dcb`).
+  Тест-харнес отсутствует — Stage C сведён к `node --check` + ручному
+  смок-плану. Journal scaffold — коммит `b6121af`.
+* **Stage A** — `checkDns(timeoutMs=5000)` добавлен сразу после
+  `checkIpv6Egress` в `node_runtime/node_agent/server.js`. Импорт
+  `const dns = require("dns")` добавлен наверх модуля.
+  * Под-проверки реализованы как описано: `runCommand("systemctl",
+    ["is-active","unbound"])` для `unbound`; разбор `/etc/resolv.conf`
+    с пропуском комментариев и пустых строк, первый `nameserver` ===
+    `127.0.0.1` для `resolver_local`; `new dns.Resolver()` +
+    `setServers(["127.0.0.1"])` + `resolve4("google.com")` обёрнутый
+    в `Promise.race` с фейк-таймаутом для `resolves`.
+  * `error` — первая словесная причина (`unbound_not_active`,
+    `resolver_no_nameserver`, `resolver_not_local:<ip>`,
+    `resolve_failed:<msg>`, `resolve_timeout`, …) либо `null`.
+  * Helper никогда не бросает — все try/catch проглатывают, errors
+    пишутся в массив, возвращается единый плоский объект. Resolver
+    закрывается через `resolver.cancel()` в finally-стиле.
+  * Коммит `ed56421`. `node --check`: clean.
+* **Stage B** — wiring в `handleHealth` и `handleDescribe`.
+  * `Promise.all([checkIpv6Egress(...), checkDns(5000)])` экономит
+    ~5s wall-clock на worst-case (раньше серийный 5+5 → теперь
+    параллельный max(5,5)=5).
+  * `/health` JSON: добавлен корневой ключ `dns: dnsCheck`, остальные
+    поля (`success`/`status`/`ok`/`ipv6`/`ipv6Egress`/`instances`/…)
+    нетронуты — additive.
+  * `/describe`: `healthSnapshot` теперь несёт `dns`,
+    `describe.js::buildDescribe` пробрасывает поле как `dns`
+    рядом с `ipv6` / `ipv6_egress`.
+  * Коммит `da4832f`. `node --check` на `server.js` + `describe.js`:
+    clean.
+* **Stage C** — `node --check` пройден на всех трёх модулях
+  (`server.js`, `describe.js`, `accounting.js`). Runtime-санита
+  `dns.Resolver` API на этом Node: `setServers`, `resolve4`, `cancel`
+  — все доступны. Тест-харнеса нет — unit-тестов не добавлено;
+  смок-план остаётся ручным (см. секцию выше).
+
+## Открытые вопросы / caveats
+
+* `checkDns` зависит от того, что node-agent запускается под
+  systemd-аккаунтом, имеющим право на `systemctl is-active unbound`
+  без sudo (read-only query). В наших инсталляциях это так
+  (под root через `install_node.sh`), но если в будущем агент
+  переедет под непривилегированного юзера — проверить.
+* Сэмпл-домен зашит как `google.com`. На случай специфических
+  блокировок (китайские сети?) — параметризовать через env позже,
+  если понадобится. Сейчас YAGNI.
+* `dns.Resolver` без нативного таймаута на `resolve4` — обвязка
+  через `Promise.race` с `setTimeout`. `setTimeout` `.unref()`-ится,
+  чтобы не задерживать процесс при выходе.
+* Бот-сторона рендера — отдельный третий промпт (звено 3/3).
