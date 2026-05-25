@@ -5,6 +5,7 @@ const fsp = require("fs/promises");
 const path = require("path");
 const net = require("net");
 const https = require("https");
+const dns = require("dns");
 const { buildDescribe } = require("./describe.js");
 const accounting = require("./accounting.js");
 
@@ -1093,6 +1094,110 @@ async function checkIpv6Egress(url, timeoutMs = 8000) {
       });
     });
   });
+}
+
+// DNS-leak probe. Mirrors checkIpv6Egress shape: never throws, always
+// resolves to a flat object that the orchestrator can pass through to
+// the bot's health panel verbatim.
+//
+//   { ok, unbound, resolver_local, resolves, error }
+//
+// "ok" is the AND of the three sub-probes — a node is DNS-clean iff
+// the local unbound service is up, /etc/resolv.conf points at
+// 127.0.0.1, and a sample A-query against 127.0.0.1 actually returns.
+async function checkDns(timeoutMs = 5000) {
+  const result = {
+    ok: false,
+    unbound: false,
+    resolver_local: false,
+    resolves: false,
+    error: null,
+  };
+  const errors = [];
+
+  // 1. unbound service active?
+  try {
+    const out = await runCommand(
+      "systemctl",
+      ["is-active", "unbound"],
+      { timeoutSec: Math.max(1, Math.floor(timeoutMs / 1000)) },
+    );
+    if (out && out.ok && String(out.stdout || "").trim() === "active") {
+      result.unbound = true;
+    } else {
+      errors.push("unbound_not_active");
+    }
+  } catch (error) {
+    errors.push(`unbound_check_failed:${error.message || String(error)}`);
+  }
+
+  // 2. /etc/resolv.conf first nameserver == 127.0.0.1?
+  try {
+    const raw = await fsp.readFile("/etc/resolv.conf", "utf-8");
+    let firstNs = null;
+    for (const rawLine of String(raw).split(/\r?\n/)) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith("#") || line.startsWith(";")) continue;
+      const match = /^nameserver\s+(\S+)/.exec(line);
+      if (match) {
+        firstNs = match[1];
+        break;
+      }
+    }
+    if (firstNs === "127.0.0.1") {
+      result.resolver_local = true;
+    } else if (firstNs === null) {
+      errors.push("resolver_no_nameserver");
+    } else {
+      errors.push(`resolver_not_local:${firstNs}`);
+    }
+  } catch (error) {
+    errors.push(`resolver_read_failed:${error.message || String(error)}`);
+  }
+
+  // 3. real A-query through the local resolver (Node built-in dns
+  //    module — no `dig` dependency).
+  try {
+    const resolver = new dns.Resolver();
+    resolver.setServers(["127.0.0.1"]);
+    const queryPromise = new Promise((resolveQuery) => {
+      try {
+        resolver.resolve4("google.com", (err, addresses) => {
+          if (err) {
+            resolveQuery({ ok: false, error: `resolve_failed:${err.message || String(err)}` });
+            return;
+          }
+          if (Array.isArray(addresses) && addresses.length > 0) {
+            resolveQuery({ ok: true, error: null });
+            return;
+          }
+          resolveQuery({ ok: false, error: "resolve_empty" });
+        });
+      } catch (syncErr) {
+        resolveQuery({ ok: false, error: `resolve_throw:${syncErr.message || String(syncErr)}` });
+      }
+    });
+    const timeoutPromise = new Promise((resolveTimeout) => {
+      setTimeout(() => resolveTimeout({ ok: false, error: "resolve_timeout" }), timeoutMs).unref?.();
+    });
+    const race = await Promise.race([queryPromise, timeoutPromise]);
+    if (race && race.ok) {
+      result.resolves = true;
+    } else if (race && race.error) {
+      errors.push(race.error);
+    }
+    try {
+      resolver.cancel();
+    } catch (_cancelErr) {
+      // best-effort cleanup
+    }
+  } catch (error) {
+    errors.push(`resolve_init_failed:${error.message || String(error)}`);
+  }
+
+  result.ok = result.unbound && result.resolver_local && result.resolves;
+  result.error = errors.length === 0 ? null : errors[0];
+  return result;
 }
 
 function shellSingleQuote(value) {
