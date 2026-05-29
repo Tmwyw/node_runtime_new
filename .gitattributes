@@ -1,0 +1,4 @@
+# Shell scripts are cloned onto Linux nodes and executed at boot — they MUST
+# stay LF-only regardless of the checkout platform, or cloud-init / bash choke
+# on CR characters. Keep this even though the repo had none before.
+*.sh text eol=lf
