@@ -566,6 +566,44 @@ EOF
   chmod 0644 /etc/cron.d/netrun-trend-monitor
 }
 
+# Re-add proxy egress IPv6 (-e addrs from 3proxy configs) on boot. The kernel
+# does NOT persist the thousands of /64 addresses across reboots; without them
+# 3proxy binds a missing source address and egress fails ("proxy invalid").
+# DAD/MLD off (98-netrun-ipv6.conf, set by configure_sysctl earlier) makes
+# re-adding thousands of addresses cheap (no MLD-overload).
+install_ipv6_restore_unit() {
+  log "Installing netrun-ipv6-restore (re-add proxy IPv6 addrs after boot)"
+  mkdir -p /opt/netrun/scripts
+  cat > /opt/netrun/scripts/netrun-ipv6-restore.sh <<'IPV6RESTORE'
+#!/usr/bin/env bash
+set -u
+IFACE=$(ip -6 route show default 2>/dev/null | grep -oP 'dev \K\S+' | head -1)
+[ -z "$IFACE" ] && exit 0
+grep -rhoE -- '-e2001:[0-9a-f:]+' /opt/netrun/proxyserver/ 2>/dev/null | sed 's/-e//' | sort -u | while read -r a; do
+  [ -n "$a" ] && ip -6 addr add "$a/64" dev "$IFACE" 2>/dev/null
+done
+logger -t netrun-ipv6-restore "re-added proxy IPv6 on $IFACE"
+IPV6RESTORE
+  chmod +x /opt/netrun/scripts/netrun-ipv6-restore.sh
+  cat > /etc/systemd/system/netrun-ipv6-restore.service <<'EOF'
+[Unit]
+Description=NETRUN - re-add proxy IPv6 /64 addresses (egress) after boot
+After=network-online.target
+Wants=network-online.target
+Before=netrun-3proxy-restore.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/netrun/scripts/netrun-ipv6-restore.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload
+  systemctl enable netrun-ipv6-restore.service >/dev/null 2>&1 || true
+}
+
 verify_health() {
   log "Waiting for /health"
   local health=""
@@ -606,6 +644,7 @@ main() {
   install_3proxy_restore_unit
   install_doctor_script
   install_trend_monitor
+  install_ipv6_restore_unit
 
   verify_health
 
