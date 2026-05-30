@@ -50,7 +50,8 @@ REMOTE
 |---|---|
 | `disable_ufw` (apt purge) | UFW при boot ставит default-deny → блокирует 8085 + proxy-порты. Убираем навсегда. |
 | `pin_dns_resolvers` + `chattr +i` | Vultr regional DNS ненадёжен (особенно Mumbai). Пинимся на 1.1.1.1/8.8.8.8, лочим immutable. |
-| `configure_sysctl` | `pid_max=4M`, `threads-max=4M`, `nf_conntrack_max=1M`, `somaxconn=8192`. Дефолтные 65536 не держат 4000+ 3proxy → fork EAGAIN. **Делает `modprobe nf_conntrack` перед `sysctl -p`** (на чистой ноде модуль не загружен). |
+| `configure_sysctl` | `pid_max=4M`, `threads-max=4M`, `nf_conntrack_max=1M`, `somaxconn=8192` в `99-netrun.conf`. Дефолтные 65536 не держат 4000+ 3proxy → fork EAGAIN. **Делает `modprobe nf_conntrack` перед `sysctl -p`** (на чистой ноде модуль не загружен). **Плюс пишет `98-netrun-ipv6.conf`** (DAD off + `mld_max_msf=1`) — снижает MLD-нагрузку от тысяч IPv6; имя 98- чтобы `node_followup_v2.sh` (перезаписывает только 99-) его не затирал. |
+| `install_trend_monitor` | `/opt/netrun/scripts/trend_monitor.sh` + cron `*/5` (`/etc/cron.d/netrun-trend-monitor`) — логгер метрик в `/var/log/netrun-trend.log` (см. §5). Раньше ручной шаг. |
 | `configure_file_limits` | `nofile=1M`, `nproc=unlimited` + `DefaultTasksMax=infinity` в `/etc/systemd/system.conf.d/`. |
 | `install_systemd_service` | node-agent на :8085 **с drop-in override** `/etc/systemd/system/netrun-node-agent.service.d/99-netrun-limits.conf` → `TasksMax=infinity` (НЕ через sed — он ломается на `\n`). |
 | `ensure_legacy_root_proxyserver_symlink` | `/root/proxyserver` → симлинк на `/opt/netrun/proxyserver`. Иначе legacy-скрипты пишут в одну директорию, а node-agent в другую → рассинхрон. |
@@ -61,7 +62,8 @@ REMOTE
 - **watchdog v3** (`/opt/netrun/scripts/watchdog_probe.sh`, timer каждые 60с):
   - 5 fails `localhost:8085/health` → `systemctl restart netrun-node-agent` (cooldown 10 мин)
   - 20 fails (~20 мин downtime) → `reboot` (cooldown 4 ч) — лечит зависший сетевой стек/Vultr-block
-- DAD off + `mld_max_msf=1` в `/etc/sysctl.d/98-netrun-ipv6.conf` — снижает MLD-нагрузку от тысяч IPv6
+
+> DAD off + `mld_max_msf=1` (`/etc/sysctl.d/98-netrun-ipv6.conf`) и `trend_monitor.sh` теперь ставит **`install_node_v2.sh`** (`configure_sysctl` / `install_trend_monitor`) — раньше были ручными твиками, выявленными аудитом нод 2026-05-30. `node_followup_v2.sh` их НЕ трогает.
 
 ---
 
@@ -170,7 +172,7 @@ UPDATE nodes SET runtime_status='active', heartbeat_failures=0, updated_at=now()
 
 ## 5. Мониторинг тренда
 
-`/opt/netrun/scripts/trend_monitor.sh` (cron `*/5`) пишет в `/var/log/netrun-trend.log`:
+`/opt/netrun/scripts/trend_monitor.sh` (cron `*/5`) пишет в `/var/log/netrun-trend.log`. **Ставится автоматически `install_node_v2.sh` (`install_trend_monitor`) — ручной шаг больше не нужен.**
 
 ```bash
 ssh root@<NODE_IP> 'tail -10 /var/log/netrun-trend.log'

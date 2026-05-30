@@ -20,6 +20,7 @@ JOBS_ROOT="/opt/netrun/jobs"
 SERVICE_NAME="netrun-node-agent"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 SYSCTL_FILE="/etc/sysctl.d/99-netrun.conf"
+SYSCTL_IPV6_FILE="/etc/sysctl.d/98-netrun-ipv6.conf"
 LIMITS_FILE="/etc/security/limits.d/99-netrun.conf"
 RESOLV_CONF="/etc/resolv.conf"
 RESTORE_SERVICE_NAME="netrun-3proxy-restore"
@@ -191,6 +192,20 @@ net.ipv4.tcp_mtu_probing = 1
 net.ipv6.conf.all.accept_ra = 2
 net.ipv6.conf.default.accept_ra = 2
 EOF
+  # === DAD/MLD off (second file, name 98- so node_followup_v2.sh — which
+  # overwrites ONLY 99-netrun.conf — leaves it intact) ===
+  cat > "$SYSCTL_IPV6_FILE" <<'EOF'
+# NETRUN — DAD/MLD off. Тысячи IPv6 на интерфейсе → DAD/MLD overload
+# (mld_ifc_work грузит CPU). DAD не нужен для наших управляемых unicast-адресов
+# (контролируем /64 сами, коллизий нет). Без этого файла нода деградирует
+# при раздувании пула до тысяч портов. Имя 98- (раньше 99-netrun.conf), чтобы
+# node_followup_v2.sh (перезаписывает только 99-) его не затирал.
+net.ipv6.conf.all.dad_transmits = 0
+net.ipv6.conf.default.dad_transmits = 0
+net.ipv6.conf.all.accept_dad = 0
+net.ipv6.conf.default.accept_dad = 0
+net.ipv6.mld_max_msf = 1
+EOF
   # Strip any legacy tcp_timestamps line from /etc/sysctl.conf — old generator
   # wrote =0 there, which is processed AFTER sysctl.d and would override our =1.
   if [ -f /etc/sysctl.conf ]; then
@@ -199,6 +214,7 @@ EOF
   # Tolerate "cannot stat" warnings (e.g. if a netfilter key still not exposed)
   sysctl --system >/dev/null 2>&1 || true
   sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1 || sysctl -p "$SYSCTL_FILE" || true
+  sysctl -p "$SYSCTL_IPV6_FILE" >/dev/null 2>&1 || true
 }
 
 configure_file_limits() {
@@ -517,6 +533,39 @@ DOCTOR
   chmod +x "$DOCTOR_SCRIPT"
 }
 
+# Trend monitor — logs node metrics every 5 min to /var/log/netrun-trend.log.
+# Canary for the IPv6/MLD leak the 98-netrun-ipv6.conf sysctl guards against.
+# Was a manual step (NODE_SETUP_RUNBOOK.md §5); now auto-installed by v2.
+install_trend_monitor() {
+  log "Installing trend_monitor.sh + cron (*/5)"
+  mkdir -p /opt/netrun/scripts
+  cat > /opt/netrun/scripts/trend_monitor.sh <<'TREND'
+#!/usr/bin/env bash
+LOG=/var/log/netrun-trend.log
+ts=$(date '+%Y-%m-%d %H:%M:%S')
+threads=$(ls -d /proc/*/task/* 2>/dev/null | wc -l)
+proc3=$(pgrep -c 3proxy)
+listening=$(ss -tln 2>/dev/null | grep -cE ':(2|3|4|5|6)[0-9]{4} ')
+estab=$(ss -tn state established 2>/dev/null | wc -l)
+ipv6cnt=$(ip -6 addr show scope global 2>/dev/null | grep -c 'inet6')
+mem=$(free -m | awk '/^Mem:/ {print $3"/"$2}')
+conntrack=$(cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null || echo 0)
+cronpids=$(cat /sys/fs/cgroup/system.slice/cron.service/pids.current 2>/dev/null || echo 0)
+fd=$(awk '{print $1}' /proc/sys/fs/file-nr)
+load=$(cut -d' ' -f1 /proc/loadavg)
+echo "$ts threads=$threads 3proxy=$proc3 listen=$listening estab=$estab ipv6=$ipv6cnt mem=${mem}MB conntrack=$conntrack cronpids=$cronpids fd=$fd load=$load" >> $LOG
+TREND
+  chmod +x /opt/netrun/scripts/trend_monitor.sh
+
+  # cron.d (NOT root crontab — the generator owns its @reboot proxy-startup
+  # entries there; we must not touch them). cron.d format has a user field.
+  cat > /etc/cron.d/netrun-trend-monitor <<'EOF'
+# NETRUN trend monitor — метрики ноды каждые 5 мин в /var/log/netrun-trend.log
+*/5 * * * * root /opt/netrun/scripts/trend_monitor.sh
+EOF
+  chmod 0644 /etc/cron.d/netrun-trend-monitor
+}
+
 verify_health() {
   log "Waiting for /health"
   local health=""
@@ -556,6 +605,7 @@ main() {
 
   install_3proxy_restore_unit
   install_doctor_script
+  install_trend_monitor
 
   verify_health
 
